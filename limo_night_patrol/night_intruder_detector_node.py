@@ -1,74 +1,65 @@
+# limo_night_patrol/night_intruder_detector_node.py
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image
-
-import numpy as np
-import cv2
-from cv_bridge import CvBridge
 
 
-class NightIntruderDetectorNode(Node):
+class NightIntruderDetector(Node):
     def __init__(self):
         super().__init__('night_intruder_detector_node')
-        self.bridge = CvBridge()
 
-        self.subscription = self.create_subscription(
-            Image,
-            '/camera/depth/image_raw',
-            self.depth_callback,
-            10
+        self.declare_parameter('hold_time_sec', 2.0)            # 몇 초 이상 가까이 있으면 intruder
+        self.declare_parameter('obstacle_topic', '/depth_obstacles')
+
+        self.hold_time = self.get_parameter('hold_time_sec').get_parameter_value().double_value
+        obstacle_topic = self.get_parameter('obstacle_topic').get_parameter_value().string_value
+
+        self.sub = self.create_subscription(Bool, obstacle_topic, self.obstacle_cb, 10)
+        self.pub = self.create_publisher(Bool, '/night_intruder', 10)
+
+        self.last_obstacle_start = None
+        self.intruder_active = False
+
+        self.get_logger().info(
+            f"NightIntruderDetectorNode started (hold_time={self.hold_time}s, obstacle_topic={obstacle_topic})"
         )
-        self.pub_intruder = self.create_publisher(Bool, 'night_intruder', 10)
 
-        self.declare_parameter('intruder_distance_max', 2.0)  # 2m 이내
-        self.declare_parameter('intruder_pixel_threshold', 500)  # 최소 픽셀 수
+    def obstacle_cb(self, msg: Bool):
+        now = self.get_clock().now().nanoseconds * 1e-9  # seconds
+        if msg.data:
+            # 장애물이 보이기 시작한 시간 기록
+            if self.last_obstacle_start is None:
+                self.last_obstacle_start = now
 
-        self.get_logger().info('NightIntruderDetectorNode started')
-
-    def depth_callback(self, msg: Image):
-        try:
-            if msg.encoding in ['32FC1', '32FC']:
-                depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
-                depth_array = np.array(depth, dtype=np.float32)
-            else:
-                depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='16UC1')
-                depth_array = np.array(depth, dtype=np.float32) / 1000.0
-        except Exception as e:
-            self.get_logger().warn(f'Failed to convert depth image: {e}')
-            return
-
-        h, w = depth_array.shape
-        h1, h2 = int(h * 1/3), int(h * 2/3)
-        w1, w2 = int(w * 1/3), int(w * 2/3)
-        roi = depth_array[h1:h2, w1:w2]
-
-        valid = np.isfinite(roi) & (roi > 0.0)
-        valid_depths = roi[valid]
-
-        if valid_depths.size == 0:
-            intruder = False
+            duration = now - self.last_obstacle_start
+            if not self.intruder_active and duration >= self.hold_time:
+                # 가까운 물체가 일정 시간 이상 머무르면 intruder로 판단
+                self.intruder_active = True
+                self.get_logger().info(f"Intruder detected (duration={duration:.2f}s)")
+                self.pub.publish(Bool(data=True))
         else:
-            dist_max = self.get_parameter('intruder_distance_max').value
-            close_pixels = valid_depths < dist_max
-            num_close = int(np.sum(close_pixels))
-            intruder_pixel_th = self.get_parameter('intruder_pixel_threshold').value
-            intruder = num_close > intruder_pixel_th
-
-        msg_out = Bool()
-        msg_out.data = intruder
-        self.pub_intruder.publish(msg_out)
+            # 장애물이 사라지면 상태 리셋
+            self.last_obstacle_start = None
+            if self.intruder_active:
+                self.intruder_active = False
+                self.get_logger().info("Intruder cleared")
+                self.pub.publish(Bool(data=False))
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = NightIntruderDetectorNode()
+    node = NightIntruderDetector()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

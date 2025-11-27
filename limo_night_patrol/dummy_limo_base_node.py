@@ -1,4 +1,5 @@
-# limo_night_patrol/limo_night_patrol/dummy_limo_base_node.py
+# limo_night_patrol/dummy_limo_base_node.py
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -30,8 +31,12 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

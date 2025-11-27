@@ -1,3 +1,5 @@
+# limo_night_patrol/patrol_manager_node.py
+
 import math
 
 import rclpy
@@ -13,7 +15,13 @@ class PatrolManagerNode(Node):
     def __init__(self):
         super().__init__('patrol_manager_node')
 
-        # 모드 / 이벤트 구독 (지금은 로그용)
+        # 현재 모드 / 이벤트 상태
+        self.current_mode = 'NIGHT'
+        self.last_event_type = None
+        self.event_pause_sec = 5.0   # 이벤트 후 몇 초 동안 순찰 일시정지할지
+        self.event_active_until = 0.0
+
+        # 모드 / 이벤트 구독
         self.sub_mode = self.create_subscription(
             String,
             'patrol_mode',
@@ -33,7 +41,7 @@ class PatrolManagerNode(Node):
         self.declare_parameter('frame_id', 'map')
         self.frame_id = self.get_parameter('frame_id').value
 
-        # 간단한 waypoint 리스트 (예시) – 나중에 YAML 파라미터로 교체 가능
+        # 간단한 waypoint 리스트 (예시)
         self.waypoints = self.create_default_waypoints()
         self.current_index = 0
         self.current_goal_handle = None
@@ -45,12 +53,15 @@ class PatrolManagerNode(Node):
         self._action_client.wait_for_server()
         self.get_logger().info('PatrolManagerNode started')
 
+    # ----------------------
+    # Waypoint 설정
+    # ----------------------
     def create_default_waypoints(self):
-        # map 좌표계에서 (x, y, yaw) 리스트 – 프로젝트 환경에 맞게 수정
+        # map 좌표계에서 (x, y, yaw) 리스트 – 실제 환경에 맞게 수정
         coords = [
             (0.0, 0.0, 0.0),
             (1.0, 0.0, 0.0),
-            (1.0, 1.0, math.pi/2),
+            (1.0, 1.0, math.pi / 2),
             (0.0, 1.0, math.pi),
         ]
         waypoints = []
@@ -68,15 +79,56 @@ class PatrolManagerNode(Node):
             waypoints.append(ps)
         return waypoints
 
+    # ----------------------
+    # 콜백: 모드 / 이벤트
+    # ----------------------
     def mode_callback(self, msg: String):
-        # NIGHT 모드인지 확인 (지금은 로그만)
-        self.get_logger().info(f'Patrol mode: {msg.data}')
+        prev = self.current_mode
+        self.current_mode = msg.data.strip().upper()
+        if self.current_mode != prev:
+            self.get_logger().info(f'Patrol mode: {prev} -> {self.current_mode}')
 
     def event_callback(self, msg: String):
-        # 밤 모드 이벤트 수신 – 로그만 남김
-        self.get_logger().info(f'Patrol event received: {msg.data}')
+        """밤 모드 이벤트 수신 시, 잠시 순찰 일시정지"""
+        self.last_event_type = msg.data
+        now = self.get_clock().now().nanoseconds * 1e-9
+        self.event_active_until = now + self.event_pause_sec
 
+        self.get_logger().info(f'Patrol event received: {msg.data}, pause patrol for {self.event_pause_sec} s')
+
+        # 현재 goal이 있으면 취소 (로봇 잠시 멈추도록)
+        if self.current_goal_handle is not None:
+            self.get_logger().info('Canceling current navigation goal due to event')
+            cancel_future = self.current_goal_handle.cancel_goal_async()
+
+            # 결과만 로그용으로 받음
+            def _cancel_done(fut):
+                try:
+                    cancel_result = fut.result()
+                    self.get_logger().info(f'Cancel result: {cancel_result}')
+                except Exception as e:
+                    self.get_logger().warn(f'Cancel goal failed: {e}')
+
+            cancel_future.add_done_callback(_cancel_done)
+
+        # goal 상태 플래그 리셋
+        self.is_sending_goal = False
+        self.current_goal_handle = None
+
+    # ----------------------
+    # 타이머: 순찰 메인 루프
+    # ----------------------
     def timer_callback(self):
+        # 1) 모드가 NIGHT가 아니면 순찰 안 함
+        if self.current_mode != 'NIGHT':
+            return
+
+        # 2) 이벤트 쿨다운 시간 동안은 순찰 일시정지
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now < self.event_active_until:
+            # self.get_logger().info('Patrol paused due to recent event')
+            return
+
         if self.is_sending_goal:
             # 이미 목표를 향해 가는 중
             return
@@ -91,6 +143,9 @@ class PatrolManagerNode(Node):
         # 다음 인덱스로
         self.current_index = (self.current_index + 1) % len(self.waypoints)
 
+    # ----------------------
+    # 액션 클라이언트 관련
+    # ----------------------
     def send_goal(self, pose: PoseStamped):
         goal_msg = NavigateToPose.Goal()
         pose.header.stamp = self.get_clock().now().to_msg()
@@ -112,6 +167,7 @@ class PatrolManagerNode(Node):
         if not goal_handle.accepted:
             self.get_logger().warn('Goal rejected')
             self.is_sending_goal = False
+            self.current_goal_handle = None
             return
 
         self.get_logger().info('Goal accepted')
@@ -126,9 +182,8 @@ class PatrolManagerNode(Node):
         self.is_sending_goal = False
 
     def feedback_callback(self, feedback_msg):
-        feedback = feedback_msg.feedback
-        # 필요하면 여기서 거리, 진행률 등 로그 찍을 수 있음
-        # self.get_logger().info(f'Current pose: {feedback.current_pose.pose.position.x:.2f}, ...')
+        # 필요하면 현재 위치/거리 등에 대한 로그 추가 가능
+        # feedback = feedback_msg.feedback
         pass
 
 
@@ -139,8 +194,12 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

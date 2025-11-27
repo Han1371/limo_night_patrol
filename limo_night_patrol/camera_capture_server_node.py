@@ -1,3 +1,5 @@
+# limo_night_patrol/camera_capture_server_node.py
+
 import os
 import datetime
 
@@ -16,10 +18,13 @@ class CameraCaptureServerNode(Node):
         self.latest_image = None
 
         self.declare_parameter('save_dir', '/tmp/limo_captures')
+        self.declare_parameter('image_topic', '/camera/color/image_raw')
+
+        image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
         self.subscription = self.create_subscription(
             Image,
-            '/camera/color/image_raw',
+            image_topic,
             self.image_callback,
             10
         )
@@ -30,7 +35,9 @@ class CameraCaptureServerNode(Node):
             self.capture_callback
         )
 
-        self.get_logger().info('CameraCaptureServerNode started')
+        self.get_logger().info(
+            f'CameraCaptureServerNode started (image_topic={image_topic})'
+        )
 
     def image_callback(self, msg: Image):
         self.latest_image = msg
@@ -70,8 +77,12 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

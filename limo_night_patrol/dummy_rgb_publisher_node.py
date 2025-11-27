@@ -1,10 +1,10 @@
-# limo_night_patrol/limo_night_patrol/dummy_rgb_publisher_node.py
+# limo_night_patrol/dummy_rgb_publisher_node.py
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import numpy as np
-import cv2
 
 
 class DummyRGBPublisherNode(Node):
@@ -40,8 +40,12 @@ def main(args=None):
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        try:
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
